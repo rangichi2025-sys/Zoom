@@ -1,0 +1,425 @@
+name: Compilar APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Crear proyecto
+        run: |
+          mkdir -p app/src/main/java/com/zoomhold app/src/main/res/xml app/src/main/res/values
+          cat > settings.gradle <<'EOF_1'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ZoomHold"
+          include ':app'
+          EOF_1
+          cat > build.gradle <<'EOF_2'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_2
+          cat > gradle.properties <<'EOF_3'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          EOF_3
+          cat > app/build.gradle <<'EOF_4'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.zoomhold'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.zoomhold"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF_4
+          cat > app/src/main/AndroidManifest.xml <<'EOF_5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Zoom al mantener">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ZoomService"
+                      android:exported="true"
+                      android:label="Zoom al mantener"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+
+              </application>
+          </manifest>
+          EOF_5
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF_6'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canControlMagnification="true"
+              android:notificationTimeout="100"
+              android:description="@string/service_description" />
+          EOF_6
+          cat > app/src/main/res/values/strings.xml <<'EOF_7'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_description">Muestra un círculo flotante. Mientras lo mantienes apretado, la pantalla se amplía; al soltarlo vuelve a normal.</string>
+          </resources>
+          EOF_7
+          cat > app/src/main/java/com/zoomhold/ZoomService.java <<'EOF_8'
+          package com.zoomhold;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.MagnificationConfig;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.SystemClock;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.widget.LinearLayout;
+
+          public class ZoomService extends AccessibilityService {
+
+              static final String PREFS = "zh";
+
+              private WindowManager wm;
+              private WindowManager.LayoutParams lp;
+              private LinearLayout root;
+              private long lastMove = 0;
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              private GradientDrawable shape(int type, int color, int radius) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setShape(type);
+                  g.setColor(color);
+                  if (radius > 0) {
+                      g.setCornerRadius(radius);
+                  }
+                  g.setStroke(dp(2), Color.WHITE);
+                  return g;
+              }
+
+              @Override
+              protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  if (root != null) {
+                      return;
+                  }
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+
+                  // Recuadro gris de arriba: sirve para arrastrar y mover todo el boton.
+                  View handle = new View(this);
+                  handle.setBackground(shape(GradientDrawable.RECTANGLE, 0xCC888888, dp(8)));
+                  root.addView(handle, new LinearLayout.LayoutParams(dp(44), dp(22)));
+
+                  // Circulo naranja: mantenerlo apretado amplia, soltarlo vuelve a normal.
+                  View zoom = new View(this);
+                  zoom.setBackground(shape(GradientDrawable.OVAL, 0xAAFF5722, 0));
+                  LinearLayout.LayoutParams zp = new LinearLayout.LayoutParams(dp(72), dp(72));
+                  zp.topMargin = dp(6);
+                  root.addView(zoom, zp);
+
+                  lp = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                  | WindowManager.LayoutParams.FLAG_SPLIT_TOUCH,
+                          PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.START;
+                  final SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+                  lp.x = sp.getInt("x", dp(8));
+                  lp.y = sp.getInt("y", dp(300));
+
+                  handle.setOnTouchListener(new View.OnTouchListener() {
+                      private int startX;
+                      private int startY;
+                      private float downX;
+                      private float downY;
+
+                      @Override
+                      public boolean onTouch(View v, MotionEvent e) {
+                          switch (e.getActionMasked()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  startX = lp.x;
+                                  startY = lp.y;
+                                  downX = e.getRawX();
+                                  downY = e.getRawY();
+                                  return true;
+                              case MotionEvent.ACTION_MOVE:
+                                  lp.x = startX + Math.round(e.getRawX() - downX);
+                                  lp.y = startY + Math.round(e.getRawY() - downY);
+                                  if (root != null) {
+                                      wm.updateViewLayout(root, lp);
+                                  }
+                                  return true;
+                              case MotionEvent.ACTION_UP:
+                              case MotionEvent.ACTION_CANCEL:
+                                  sp.edit().putInt("x", lp.x).putInt("y", lp.y).apply();
+                                  return true;
+                              default:
+                                  return true;
+                          }
+                      }
+                  });
+
+                  zoom.setOnTouchListener((v, e) -> {
+                      switch (e.getActionMasked()) {
+                          case MotionEvent.ACTION_DOWN:
+                              zoomIn(e.getRawX(), e.getRawY());
+                              return true;
+                          case MotionEvent.ACTION_MOVE:
+                              long now = SystemClock.uptimeMillis();
+                              if (now - lastMove > 30) {
+                                  lastMove = now;
+                                  moveCenter(e.getRawX(), e.getRawY());
+                              }
+                              return true;
+                          case MotionEvent.ACTION_UP:
+                          case MotionEvent.ACTION_CANCEL:
+                              zoomOut();
+                              return true;
+                          default:
+                              return true;
+                      }
+                  });
+
+                  wm.addView(root, lp);
+              }
+
+              private void zoomIn(float x, float y) {
+                  try {
+                      float scale = getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("scale", 2.0f);
+                      AccessibilityService.MagnificationController mc = getMagnificationController();
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          MagnificationConfig cfg = new MagnificationConfig.Builder()
+                                  .setMode(MagnificationConfig.MAGNIFICATION_MODE_FULLSCREEN)
+                                  .setScale(scale)
+                                  .setCenterX(x)
+                                  .setCenterY(y)
+                                  .build();
+                          mc.setMagnificationConfig(cfg, false);
+                      } else {
+                          mc.setScale(scale, false);
+                          mc.setCenter(x, y, false);
+                      }
+                  } catch (Exception ignored) {
+                      // Si el sistema no deja ampliar, no hacemos nada.
+                  }
+              }
+
+              private void moveCenter(float x, float y) {
+                  try {
+                      getMagnificationController().setCenter(x, y, false);
+                  } catch (Exception ignored) {
+                      // Nada.
+                  }
+              }
+
+              private void zoomOut() {
+                  try {
+                      getMagnificationController().reset(false);
+                  } catch (Exception ignored) {
+                      // Nada.
+                  }
+              }
+
+              private void removeButton() {
+                  zoomOut();
+                  if (root != null && wm != null) {
+                      try {
+                          wm.removeView(root);
+                      } catch (Exception ignored) {
+                          // Nada.
+                      }
+                  }
+                  root = null;
+              }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  // No necesitamos leer la pantalla.
+              }
+
+              @Override
+              public void onInterrupt() {
+                  zoomOut();
+              }
+
+              @Override
+              public boolean onUnbind(Intent intent) {
+                  removeButton();
+                  return super.onUnbind(intent);
+              }
+
+              @Override
+              public void onDestroy() {
+                  removeButton();
+                  super.onDestroy();
+              }
+          }
+          EOF_8
+          cat > app/src/main/java/com/zoomhold/MainActivity.java <<'EOF_9'
+          package com.zoomhold;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              private String label(float scale) {
+                  return "Nivel de zoom: " + String.format(Locale.US, "%.1f", scale) + "x";
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  final SharedPreferences sp = getSharedPreferences(ZoomService.PREFS, MODE_PRIVATE);
+
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setBackgroundColor(Color.BLACK);
+                  l.setPadding(dp(20), dp(40), dp(20), dp(20));
+
+                  TextView info = new TextView(this);
+                  info.setTextColor(Color.WHITE);
+                  info.setTextSize(22);
+                  info.setText("Paso 1: toca el boton de abajo y activa \"Zoom al mantener\" en Accesibilidad.\n\n"
+                          + "Paso 2: aparece un circulo naranja flotante. Mantenlo apretado para ampliar "
+                          + "y sueltalo para volver a normal. Arrastra el recuadro gris de arriba para moverlo.\n");
+                  l.addView(info);
+
+                  Button open = new Button(this);
+                  open.setTextSize(20);
+                  open.setText("Abrir Accesibilidad");
+                  open.setOnClickListener(v ->
+                          startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+                  l.addView(open);
+
+                  final TextView lab = new TextView(this);
+                  lab.setTextColor(Color.WHITE);
+                  lab.setTextSize(22);
+                  lab.setPadding(0, dp(30), 0, dp(10));
+                  float cur = sp.getFloat("scale", 2.0f);
+                  lab.setText(label(cur));
+                  l.addView(lab);
+
+                  SeekBar sb = new SeekBar(this);
+                  sb.setMax(25);
+                  sb.setProgress(Math.round((cur - 1.5f) * 10f));
+                  sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                          float s = 1.5f + progress / 10f;
+                          lab.setText(label(s));
+                          sp.edit().putFloat("scale", s).apply();
+                      }
+
+                      @Override
+                      public void onStartTrackingTouch(SeekBar bar) {
+                      }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar bar) {
+                      }
+                  });
+                  l.addView(sb);
+
+                  setContentView(l);
+              }
+          }
+          EOF_9
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Compilar
+        run: gradle assembleDebug --no-daemon
+      - name: Publicar APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Zoom al mantener ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
